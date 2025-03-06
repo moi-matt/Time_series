@@ -1,0 +1,614 @@
+---
+title: "Modélisation du trafic aérien mondial"
+output:
+  word_document:
+    toc: yes
+  html_document:
+    toc: yes
+---
+Import des packages :
+```{r}
+library(tidyr)
+library(forecast)
+library(ggplot2)
+library(caschrono)
+#library(lubridate)
+```
+
+Chargement des données et allure de la série :
+```{r}
+data = read.csv('ST_4GM_Projet.csv', sep = ';', dec = ',', header = TRUE)
+head(data)
+summary(data)
+cap_mondiale = ts(data$ASKs, start = c(2011, 1), end = c(2020, 12), frequency = 12)
+plot(cap_mondiale, main="Evolution de l'ASK avec le temps", ylab="ASK")
+plot(decompose(cap_mondiale))
+```
+Divisions des données et création d'une série "avant covid"
+```{r}
+div=10^11
+cap_mondiale_avant_covid=window(cap_mondiale, start = c(2011, 1), end = c(2019,12))
+plot(div_cap_mondiale_avant_covid, main="Evolution de la capacité mondiale avant 2020 (données divisées)", ylab="ASK")
+div_cap_mondiale=ts(cap_mondiale_avant_covid/div, start=c(2011,1), end=c(2020,12), frequency=12)
+div_cap_mondiale_avant_covid=window(div_cap_mondiale, start = c(2011, 1), end = c(2019,12))
+```
+
+Fonctions permettant de tracer les résidus:
+
+Résidus studentisés pour la régression linéaire :
+```{r}
+PlotResStudent<-function(modele){
+    plot(modele$fitted.values, rstudent(modele),ylim=c(-5,3), type="p", main="Recherche de valeurs aberrantes via l'analyse des résidus studentisés", xlab="Valeurs ajustées", ylab="Résidus studentisés", xy.labels=FALSE)
+    abline(h=2)
+    abline(h=-2)
+    PtAb=which(rstudent(modele) < -2 | rstudent(modele) > 2)
+    if(length(PtAb)!=0){
+        text(modele$fitted.values[PtAb]+0.06, rstudent(modele)[PtAb],PtAb)
+    }
+    
+    return(PtAb)
+}
+
+```
+Pour les modèles de HoltWinters et Arima :
+```{r}
+plot_residuals=function(model,data){
+  plot(resid(model), main="Vérification de la moyenne nulle des résidus")
+  abline(h=0)
+  hist(resid(model))
+  qqnorm(resid(model), xy_labels=FALSE,main="Diagramme quantile quantile de la loi normale")
+  abline(b=1, a=0)
+  plot(data-resid(model), resid(model), xy.labels = FALSE, main="Vérification de l'homoscédasticité des résidus")
+}
+```
+
+
+
+
+# I. Prévisions avant covid
+Pour tracer les courbes avec les données avant covid :
+```{r}
+plot_predict_av_cov <- function(train,predict, time_pred, title){
+  ggplot()+
+  geom_line(aes(x=time(cap_mondiale_avant_covid), y=cap_mondiale_avant_covid, color="black"))+
+  geom_line(aes(x=time(cap_mondiale_avant_covid_train), y=train, color="blue"))+
+  geom_line(aes(x=time_pred, y=predict$mean, color='red'))+
+  geom_ribbon(aes(x=time_pred, ymin=predict$lower, ymax=predict$upper), alpha=0.2)+
+  ggtitle(title)+
+  scale_color_manual(name=NULL,
+                     values=c("black","blue", "red"),
+                     labels=c("courbe RPK avant covid","courbe entrainement", "courbe validation" ))+
+  theme(legend.position="bottom")
+
+}
+```
+Séparation du jeu de données en un jeu d'entrainement et un jeu de validation
+```{r}
+annee_separation=2018
+len_train=7*12
+div_cap_mondiale_avant_covid_train=ts(div_cap_mondiale_avant_covid[1:len_train], start = c(2011, 1), end = c(annee_separation-1,12), frequency = 12)
+div_cap_mondiale_avant_covid_valid=ts(div_cap_mondiale_avant_covid[len_train:length(cap_mondiale_avant_covid)], start = c(annee_separation, 1), end = c(2019,12), frequency=12)
+
+len_valid=length(cap_mondiale_avant_covid_valid)
+```
+
+Passage au logarithme
+```{r}
+
+log_div_cap_mondiale=log(div_cap_mondiale)
+log_div_cap_mondiale_avant_covid = window(log_div_cap_mondiale, start = c(2011, 1), end = c(2019,12)) #On sélectionne les données avant février 2020
+
+log_div_cap_mondiale_avant_covid_train=ts(log_div_cap_mondiale_avant_covid[1:len_train], start = c(2011, 1), end = c(annee_separation-1,12), frequency = 12)
+log_div_cap_mondiale_avant_covid_valid=ts(log_div_cap_mondiale_avant_covid[len_train:length(log_div_cap_mondiale_avant_covid)], start = c(annee_separation, 1), end = c(2019,12), frequency=12)
+```
+
+Modèle linéaire :
+```{r}
+modele_reg1 = tslm(log_div_cap_mondiale_avant_covid_train ~ -1 +trend+season)
+summary(modele_reg1)
+```
+```{r}
+#Analyse des résidus studentisés
+ptAb=PlotResStudent(modele_reg1)
+qqnorm(rstudent(modele_reg1))
+abline(a=0,b=1)
+mean(modele_reg1$residuals)
+```
+Valodation des prédictions
+```{r}
+
+validation=forecast(modele_reg1, h=len_valid, level=0.95)
+validation$mean=exp(validation$mean)*div
+validation$lower=exp(validation$lower)*div
+validation$upper=exp(validation$upper)*div
+
+recompose_train=exp(modele_reg1$fitted.values)*div
+
+err_lin=sum((as.numeric(validation$mean)-cap_mondiale[seq(len_train+1, len_train+len_valid)])^2) #calcul de la somme des erreur s au carré.
+
+ggplot()+
+  geom_line(aes(x=time(log_div_cap_mondiale_avant_covid), y=exp(log_div_cap_mondiale_avant_covid)*div, color="black"))+
+  geom_line(aes(x=time(log_div_cap_mondiale_avant_covid_train), y=recompose_train, color="blue"))+
+  geom_line(aes(x=time(log_div_cap_mondiale_avant_covid_valid), y=validation$mean, color='red'))+
+  geom_ribbon(aes(x=time(log_div_cap_mondiale_avant_covid_valid), ymin=validation$lower, ymax=validation$upper), alpha=0.2)+
+  labs(x="temps", y="ASK")+
+  ggtitle("Entrainement et validation avec un modèle linéaire et sans crise sanitaire")+
+  scale_color_manual(name=NULL,
+                     values=c("black","blue", "red"),
+                     labels=c("courbe ASK avant covid","courbe entrainement", "courbe validation" ))+
+  theme(legend.position="bottom")
+  
+
+
+```
+
+Prédiction sur la régression linéaire
+```{r}
+nb_annee_pred=6
+pred_reg1=forecast(modele_reg1, h=len_valid+nb_annee_pred*12, level=0.95)
+pred_reg1$mean=exp(pred_reg1$mean)*div
+pred_reg1$lower=exp(pred_reg1$lower)*div
+pred_reg1$upper=exp(pred_reg1$upper)*div
+time_pred_sans_covid=time(ts(pred_reg1$mean, start=c(annee_separation,1), end=c(2025,12), frequency=12))
+
+ggplot()+
+  geom_line(aes(x=time(cap_mondiale_avant_covid), y=cap_mondiale_avant_covid, color="black"))+
+  geom_line(aes(x=time(cap_mondiale_avant_covid_train), y=recompose_train, color="blue"))+
+  geom_line(aes(x=time_pred_sans_covid, y=pred_reg1$mean, color="red"))+
+  geom_ribbon(aes(x=time_pred_sans_covid, ymin=pred_reg1$lower, ymax=pred_reg1$upper), alpha=0.2)+
+  labs(x="temps", y="ASK")+
+  ggtitle("Prédiction de l'ASK avec le modèle linéaire et sans crise sanitaire")+
+  scale_color_manual(name=NULL,
+                     values=c("black","blue", "red"),
+                     labels=c("courbe ASK avant covid","courbe entrainement", "prédiction" ))+
+  theme(legend.position="bottom")
+
+
+```
+
+Modèle de HoltWinters
+```{r}
+
+model_H=HoltWinters(log_div_cap_mondiale_avant_covid_train, seasonal = "additive") 
+
+validation_H=forecast(model_H, h=len_valid, level=0.95)
+validation_H$mean=exp(validation_H$mean)*div
+validation_H$lower=exp(validation_H$lower)*div
+validation_H$upper=exp(validation_H$upper)*div
+
+err_H=sum((as.numeric(validation_H$mean)-cap_mondiale[seq(len_train+1, len_train+len_valid)])^2)
+
+recons_H=exp(model_H$fitted[,1])*div
+```
+
+```{r}
+length(time(cap_mondiale_avant_covid_train)[-(1:12)])
+ggplot()+
+  geom_line(aes(x=time(cap_mondiale_avant_covid), y=cap_mondiale_avant_covid, color="black"))+
+  geom_line(aes(x=time(cap_mondiale_avant_covid_train)[-(1:12)], y=recons_H,color="blue") )+
+  geom_line(aes(x=time(cap_mondiale_avant_covid_valid), y=validation_H$mean,color="red"))+
+  geom_ribbon(aes(x=time(cap_mondiale_avant_covid_valid), ymin=validation_H$lower, ymax=validation_H$upper), alpha=0.2)+
+  labs(x="temps", y="ASK", fill="")+
+  ggtitle("Entrainement et validation avec un lissage de Holtwinters")+
+  scale_color_manual(name=NULL,
+                     values=c("black","blue", "red"),
+                     labels=c("courbe ASK avant covid","courbe entrainement", "courbe validation" ))+
+  theme(legend.position="bottom")
+  
+```
+Etude des résidus du lissage de Holtwinters
+```{r}
+plot_residuals(model_H,log_div_cap_mondiale_avant_covid_train )
+qqnorm(resid(model_H))
+abline(b=0.01, a=0)
+```
+Prédiction avec le lissage de HoltWinters :
+```{r}
+nb_annee_pred=6
+prediction_H=forecast(model_H, h=nb_annee_pred*12+len_valid, level=0.95)
+prediction_H
+prediction_H$mean=exp(prediction_H$mean)*div
+
+prediction_H$lower=ts(exp(prediction_H$lower)*div, start=c(2018,01), end=c(2025,12), frequency=12)
+prediction_H$upper=ts(exp(prediction_H$upper)*div, start=c(2018,01), end=c(2025,12), frequency=12)
+length(prediction_H$mean)
+prediction_H$upper
+ggplot()+
+  geom_line(aes(x=time(cap_mondiale_avant_covid), y=cap_mondiale_avant_covid, color="black"))+
+  geom_line(aes(x=time(cap_mondiale_avant_covid_train)[-(1:12)], y=recons_H, color="blue"))+
+  geom_line(aes(x=time_pred_sans_covid, y=prediction_H$mean, color="red"))+
+  geom_ribbon(aes(x=time_pred_sans_covid, ymin=prediction_H$lower, ymax=prediction_H$upper), alpha=0.2)+
+  labs(x="temps", y="ASK", fill="")+
+  ggtitle("Prédiction et intervalle de confiance avec le lissage de Holtwinters")+
+  scale_color_manual(name=NULL,
+                     values=c("black","blue", "red"),
+                     labels=c("courbe ASK avant covid","courbe entrainement", "courbe de prédiction" ))+
+  theme(legend.position="bottom")
+
+```
+
+
+
+Modèle ARIMA
+
+Supression de la tendance et de la saisonnalité et test de dickey-Fuller :
+```{r}
+detrend_deseason=modele_reg1$residuals #désaisonnalisation
+diff_detrend_deseason=diff(detrend_deseason)
+n=length(detrend_deseason)
+modele=lm(diff_detrend_deseason~-1+detrend_deseason[-n])
+summary(modele)
+plot(detrend_deseason)
+```
+La courbe désaisonnalisée et sans tendance est bien stationnaire
+```{r}
+plor(detrend_deseason)
+acf(detrend_deseason)
+pacf(detrend_deseason)
+modele_arima=auto.arima(detrend_deseason, seasonal=F, ic="aic", d=0)
+summary(modele_arima)
+mod_arma=arima(detrend_deseason, order=c(1,0,1), include.mean=F)
+t_stat(mod_arma)
+```
+On obtient un arma(1,1) avec le modèle désaisonnalisée et sans tendance
+
+Vérification des hypothèses sur les résidus
+```{r}
+plot_residuals(mod_arma, detrend_deseason)
+```
+Comme précédemment, la normalité, le centrage et l'homoscédasticité semble être respectée. Toutefois, la variance est très petite puisque le diagramme qqnorm suit une  droite de pente très faible comparée à la première bissectrice 
+
+Entrainement et validation du modèle :
+```{r}
+recons=exp(detrend_deseason-resid(mod_arma)+modele_reg1$fitted.values)*div #reconstruction en ajoutant la tendance et la sasionnalité au modele arma
+
+validation=forecast(modele_arima, h=len_valid, level=0.95) #on prédit le modèle arma
+plot(validation)
+
+trend_validation=seq(len_train+1,len_valid+len_train)*modele_reg1$coefficients[1] #On ajoutera la tendance
+season_validation=rep(modele_reg1$coefficients[2:13],2) # On ajoutera la saisonnalité
+
+validation$mean=exp(validation$mean+season_validation+trend_validation)*div
+validation$lower=exp(validation$lower+season_validation+trend_validation)*div
+validation$upper=exp(validation$upper+season_validation+trend_validation)*div
+
+err_arma=sum((as.numeric(validation$mean)-cap_mondiale[seq(len_train+1, len_train+len_valid)])^2)
+
+validation$mean
+cap_mondiale[seq(len_train+1, len_train+len_valid)]
+plot_predict_av_cov(recons, validation, time(cap_mondiale_avant_covid_valid), "Entrainement et validation avec le modèle arma")
+```
+Prediction 
+```{r}
+nb_annee_pred=6
+
+pred_arma=forecast(mod_arma, h=len_valid+nb_annee_pred*12, level=0.95)
+trend_prediction=seq(len_train+1,len_valid+len_train+nb_annee_pred*12)*modele_reg1$coefficients[1]
+season_prediction=rep(modele_reg1$coefficients[2:13],len_valid/12+nb_annee_pred)
+
+pred_arma$mean=exp(pred_arma$mean+trend_prediction+season_validation)*div
+pred_arma$lower=exp(pred_arma$lower+trend_prediction+season_validation)*div
+pred_arma$upper=exp(pred_arma$upper+trend_prediction+season_validation)*div
+plot_predict_av_cov(recons, pred_arma, time_pred1, "Prédiction avec le modèle arma")
+```
+
+Comparaison des prédictions avec les données sans covid
+```{r}
+rescale_2021=function(prediction){
+  rescale=list()
+  n=length(cap_mondiale)
+  rescale$mean=window(prediction$mean, start=c(2020,12), end=c(2025,12))
+  rescale$mean=rescale$mean-rescale$mean[1]+cap_mondiale[n]
+  rescale$upper=window(prediction$upper, start=c(2020,12), end=c(2025,12))
+  rescale$upper=rescale$upper-rescale$upper[1]+cap_mondiale[n]
+  rescale$lower=window(prediction$lower, start=c(2020,12), end=c(2025,12))
+  rescale$lower=rescale$lower-rescale$lower[1]+cap_mondiale[n]
+  return(rescale)
+}
+pred_reg1_rescale=rescale_2021(pred_reg1)
+pred_arma_rescale=rescale_2021(pred_arma)
+pred_H_rescale=rescale_2021(prediction_H)
+time_pred_rescale=time(pred_reg1_rescale$mean)
+ggplot()+
+  geom_line(aes(x=time(cap_mondiale), y=cap_mondiale, color="black"))+
+  geom_line(aes(x=time_pred_rescale,y=pred_reg1_rescale$mean, color="red"))+
+  geom_ribbon(aes(x=time_pred_rescale, ymax=pred_reg1_rescale$upper, ymin=pred_reg1_rescale$lower), alpha=0.4)+
+  
+  geom_line(aes(x=time_pred_rescale, y=pred_arma_rescale$mean, color="green"))+
+  geom_ribbon(aes(x=time_pred_rescale, ymax=pred_arma_rescale$upper, ymin=pred_arma_rescale$lower), alpha=0.3)+
+  
+  geom_line(aes(x=time_pred_rescale, y=pred_H_rescale$mean, color="blue"))+
+  geom_ribbon(aes(x=time_pred_rescale, ymax=pred_H_rescale$upper, ymin=pred_H_rescale$lower), alpha=0.3)+
+  
+  ggtitle("Comparaison des prédictions entrainées avec les données d'avant 2020")+
+  labs(x="temps", y="ASK", fill="")+
+  scale_color_manual(name=NULL,
+                     values=c("black","red", "green", "blue"),
+                     labels=c("courbe ASK","prédiction reg lin", "prédiction arma", "prediction H-W" ))+
+  theme(legend.position="bottom")
+  
+
+
+```
+
+Comparaison des erreurs de validation
+```{r}
+ggplot(data=data.frame(modele=c("reg lin", "H-W", "arma"), erreur_carre=c(err_lin, err_H, err_arma)), aes(x=modele, y=erreur_carre))+
+         geom_bar(stat="identity")+
+  ggtitle("Somme des écarts au carré entre la série de validation et la série réelle ")
+```
+Comparaison de la distribution des résidus
+
+```{r}
+resid=data.frame(resid_reg1=modele_reg1$residuals[-seq(1,12)], resid_arma=resid(mod_arma)[-seq(1,12)], resid_H=resid(model_H))
+boxplot(resid, main="Distribution des résidus")
+```
+
+
+
+ II. Prévisions avec les données de 2020
+On ne définit pas de jeu de validation car la taille serait trop petite
+
+Modèle linéaire sur les données divisées et logarithmisées
+```{r}
+modele_reg2 = tslm(log_div_cap_mondiale ~trend-1+season)
+summary(modele_reg2)
+```
+
+```{r}
+recompose=exp(modele_reg2$fitted.values)*div
+ggplot()+
+  geom_line(aes(x=time(cap_mondiale), y=cap_mondiale, color="black"))+
+  geom_line(aes(x=time(cap_mondiale), y=recompose, color="blue"))+
+  ggtitle("Modélisation du RPK sur l'ensemble des données avec une régression linéaire")+
+  labs(x="temps", y="ASK", fill="")+
+  scale_color_manual(name=NULL,
+                     values=c("black", "blue"),
+                     labels=c("courbe RPK réelle","prédiction reg lin"))+
+  theme(legend.position="bottom")
+  
+```
+Aucun modèle linéaire ne pourra bien s'ajuster car la tendance linéaire ne permet pas de modéliser une chute si importante.
+
+Prédiction sur le modèle linéaire :
+```{r}
+nb_annee_pred=5
+prediction_reg2=forecast(modele_reg2, h=nb_annee_pred*12, level=0.95)
+prediction_reg2$mean=exp(prediction_reg2$mean)*div
+prediction_reg2$lower=exp(prediction_reg2$lower)*div
+prediction_reg2$upper=exp(prediction_reg2$upper)*div
+time_pred=time(prediction_reg2$mean)
+length(time_pred)
+
+ggplot()+
+  geom_line(aes(x=time(cap_mondiale), y=cap_mondiale))+
+  geom_line(aes(x=time(cap_mondiale), y=recompose), color="blue")+
+ geom_line(aes(x=time_pred, y=prediction_reg2$mean), color="red")+
+  geom_ribbon(aes(x=time_pred, ymin=prediction_reg2$lower, ymax=prediction_reg2$upper), alpha=0.2)
+
+
+ptAb=PlotResStudent(modele_reg2)
+truc=qqnorm(rstudent(modele_reg2))
+abline(a=0,b=1)
+hist(rstudent(modele_reg2))
+
+```
+
+
+Modèle de Holtwinters
+```{r}
+modele_H2=HoltWinters(log_div_cap_mondiale)
+
+recons=exp(modele_H2$fitted[,1])*div
+
+nb_annee_pred=5
+prediction_H2=forecast(modele_H2, h=nb_annee_pred*12, level=0.95)
+time_pred2=time(ts(prediction_H2$mean, start=c(2021,01), end=c(2025,12), frequency = 12))
+prediction_H2$mean=exp(prediction_H2$mean)*div
+prediction_H2$lower=exp(prediction_H2$lower)*div
+prediction_H2$upper=exp(prediction_H2$upper)*div
+
+ggplot()+
+  geom_line(aes(x=time(cap_mondiale), y=cap_mondiale, color="black"))+
+  geom_line(aes(x=time(cap_mondiale)[-seq(1,12)], y=recons,  color="blue"))+
+  geom_line(aes(x=time_pred2, y=prediction_H2$mean,  color='red'))+
+  geom_ribbon(aes(x=time_pred2, ymin=prediction_H2$lower, ymax=prediction_H2$upper), alpha=0.2)+
+  ggtitle("Modèle de Holt-Winters en prenant les données divisées et logarithmisées")+
+  labs(x="temps", y="ASK")+
+  scale_color_manual(name=NULL,
+                     breaks=c("black", "blue", "red"),
+                     values=c("black", "blue", "red"),
+                     labels=c("courbe ASK réelle","lissage HoltWinters", "prédiction HoltWinters"))+
+  theme(legend.position="bottom")
+
+plot_residuals(modele_H2, log_div_cap_mondiale)
+
+```
+2e modèle de Holtwinters
+```{r}
+log_cap_mondiale=log(cap_mondiale)
+modele_H3=HoltWinters(log_cap_mondiale)
+recons=exp(modele_H3$fitted[,1])
+nb_annee_pred=5
+prediction_H3=forecast(modele_H3, h=nb_annee_pred*12, level=0.95)
+
+prediction_H3$mean=exp(prediction_H3$mean)
+prediction_H3$lower=exp(prediction_H3$lower)
+prediction_H3$upper=exp(prediction_H3$upper)
+ggplot()+
+  geom_line(aes(x=time(cap_mondiale), y=cap_mondiale, color="black"))+
+  geom_line(aes(x=time(cap_mondiale)[-seq(1,12)], y=recons, color="blue"))+
+  geom_line(aes(x=time_pred2, y=prediction_H3$mean, color='red'))+
+  geom_ribbon(aes(x=time_pred2, ymin=prediction_H3$lower, ymax=prediction_H3$upper), alpha=0.2)+
+  ggtitle("Modèle de Holt-Winters en prenant les données logarithmisées")+
+  labs(x="temps", y="ASK")+
+  labs(x="temps", y="ASK")+
+  scale_color_manual(name=NULL,
+                     breaks=c("black", "blue", "red"),
+                     values=c("black", "blue", "red"),
+                     labels=c("courbe ASK réelle","lissage HoltWinters", "prédiction HoltWinters"))+
+  theme(legend.position="bottom")
+
+plot_residuals(modele_H3, log_cap_mondiale)
+```
+
+
+
+Modèle Arma
+
+
+```{r}
+deseason1=diff(log_div_cap_mondiale, lag=12) #☻supression de la saisonnalité
+
+diff_deseason1=diff(deseason1)
+trend=seq(1,length(diff_deseason1))
+n=length(deseason1)
+reg=lm(diff_deseason1~trend+deseason1[-n])
+summary(reg)
+reg2=lm(diff_deseason1~trend+deseason1[-n]-1)
+summary(reg2)
+reg3=lm(diff_deseason1~deseason1[-n]-1)
+summary(reg3)
+# Le processus est DS, on travaille sur la série différenciée et désaisonnalisée
+
+modele_arima_tout1=auto.arima(diff_deseason1)
+summary(modele_arima_tout1)
+
+```
+On obtient un arima(0,0,0) ce qui n'est pas utile puisque la modélisation corespond à une constante égale à 0.
+Comme on peut le voir ci-après :
+```{r}
+pred_arma_tout1=forecast(modele_arima,h=5*12, level = 0.95)
+plot(diff_deseason1-resid(modele_arima_tout1))
+recons=exp(diff_deseason1-resid(modele_arima_tout1)+deseason1[-1]+log_div_cap_mondiale[-seq(1,13)])*div
+ggplot()+
+  geom_line(aes(x=time(cap_mondiale), y=cap_mondiale), label="courbe réelle")+
+  geom_line(aes(x=time(cap_mondiale)[-seq(1,13)], y=recons), color="blue", label="fitted value")
+```
+On travail sur les données seulement logarithmisées
+```{r}
+deseason2=diff(log_cap_mondiale, lag=12)
+plot(deseason)
+
+diff_deseason2=diff(deseason2)
+trend=seq(1,length(diff_deseason2))
+n=length(deseason)
+reg=lm(diff_deseason2~trend+deseason2[-n])
+summary(reg)
+reg2=lm(diff_deseason2~deseason2[-n])
+summary(reg2)
+reg3=lm(diff_deseason2~deseason2[-n]-1)
+summary(reg3)
+#Le processus est DS, on travaille sur la série différenciée.
+
+modele_arima2=auto.arima(diff_deseason2)
+summary(modele_arima2)
+plot(diff_deseason2-resid(modele_arima2)+log_cap_mondiale[-seq(1,13)])
+
+recons2=exp(modele_arima2$fitted+deseason2[-1]+log_cap_mondiale[-seq(1,13)])
+ggplot()+
+  geom_line(aes(x=time(cap_mondiale), y=cap_mondiale, color="black"))+
+  geom_line(aes(x=time(cap_mondiale)[-seq(1,13)], y=recons2, color="blue"))+
+  ggtitle("Modélisation de l'ASK avec un MA1")+
+  labs(x="temps", y="ASK")+
+  scale_color_manual(name=NULL,
+                     values=c("black", "blue"),
+                     labels=c("courbe ASK","Modélisation ma1" ))+
+  theme(legend.position="bottom")
+```
+
+Prédiction avec le modèle arima sur le processus stationnarisé
+```{r}
+nb_annee_pred=5
+pred_arma2=forecast(modele_arima2,h=nb_annee_pred*12, level = 0.95)
+plot(pred_arma2, main="Prédiction du mdèle arma sur le processus stationnarisée")
+```
+La prédiction est une constante de 0.
+
+On estime la tendance et la saisonnalité sur les données logarithmisées avant covid.
+```{r}
+log_cap_mondiale_avant_covid=log(cap_mondiale_avant_covid)
+plot(log_cap_mondiale_avant_covid)
+reg=tslm(log_cap_mondiale_avant_covid~trend+season-1)
+summary(reg)
+trend_prediction=seq(1,length(pred_arma2$mean))*reg$coefficients[1]
+seq(1,length(pred_arma2$mean))
+seasonal_prediction=rep(reg$coefficients[2:13], 5)
+```
+On ajoute tendance et saisionnalité à la la prédiction
+```{r}
+pred_arma2$mean=ts(exp(pred_arma2$mean+trend_prediction+seasonal_prediction), start=c(2021,01), end=c(2025,12), frequency=12)
+time_pred3=time(pred_arma2$mean)
+pred_arma2$lower=exp(pred_arma2$lower+trend_prediction+seasonal_prediction)
+pred_arma2$upper=exp(pred_arma2$upper+trend_prediction+seasonal_prediction)
+```
+On remet les données au niveau du dernier ajustement du modèle.
+```{r}
+point=pred_arma2$mean[1]
+
+pred_arma2$mean=pred_arma2$mean-pred_arma2$mean[1]+recons2[length(recons2)]
+pred_arma2$lower=pred_arma2$lower-point+recons2[length(recons2)]
+pred_arma2$upper=pred_arma2$upper-point+recons2[length(recons2)]
+
+  pred_arma2$upper
+ggplot()+
+  geom_line(aes(x=time(cap_mondiale), y=cap_mondiale, color="black"))+
+  geom_line(aes(x=time(cap_mondiale)[-seq(1,13)], y=recons2, color="blue"))+
+  geom_line(aes(x=time_pred3, y=pred_arma2$mean, color="red"))+
+  geom_ribbon(aes(x=time_pred3, ymin=pred_arma2$lower, ymax=pred_arma2$upper), alpha=0.2)+
+  ggtitle("Prédiction avec le MA1 sur toutes les données")+
+  labs(x="temps", y="ASK")+
+  scale_color_manual(name=NULL,
+                     values=c("black", "blue", "red"),
+                     labels=c("courbe ASK réelle","Modélisation ma1", "prédiction" ))+
+  theme(legend.position="bottom")
+  
+```
+
+ III. Comparaison entre les 2 approches et études des effets de la crise
+
+```{r}
+length(pred_arma_rescale$mean)
+ggplot()+
+  geom_line(aes(x=time(cap_mondiale), y=cap_mondiale, color="black"))+
+  geom_line(aes(x=time_pred2, y=prediction_H3$mean, color='red'))+
+  geom_ribbon(aes(x=time_pred2, ymin=prediction_H3$lower, ymax=prediction_H3$upper), alpha=0.2)+
+  
+  geom_line(aes(x=time_pred_rescale, y=pred_arma_rescale$mean, color="green"))+
+  geom_ribbon(aes(x=time_pred_rescale, ymax=pred_arma_rescale$upper, ymin=pred_arma_rescale$lower), alpha=0.3)+
+  
+  geom_line(aes(x=time_pred_rescale, y=pred_H_rescale$mean, color="blue"))+
+  geom_ribbon(aes(x=time_pred_rescale, ymax=pred_H_rescale$upper, ymin=pred_H_rescale$lower), alpha=0.3)+
+
+   ggtitle("Comparaison des prédictions entrainées avec et sans les données 2020")+
+  labs(x="temps", y="ASK", fill="")+
+  scale_color_manual(name=NULL,
+                     values=c("black","red", "green", "blue"),
+                     labels=c("courbe ASK réelle","prédiction H-W \n sans covid", "prédiction arma  \n sans covid", "prediction H-W \n avec covid" ))+
+  theme(legend.position="bottom")
+
+
+```
+
+Impact de la crise sur les prévisions :
+```{r}
+ggplot()+
+  geom_line(aes(x=time(cap_mondiale), y=cap_mondiale, color="black"))+
+  geom_line(aes(x=time_pred2, y=prediction_H3$mean, color='red'))+
+  geom_ribbon(aes(x=time_pred2, ymin=prediction_H3$lower, ymax=prediction_H3$upper), alpha=0.2)+
+  
+  geom_line(aes(x=time_pred_sans_covid, y=prediction_H$mean, color="green"))+
+  geom_ribbon(aes(x=time_pred_sans_covid, ymin=prediction_H$lower, ymax=prediction_H$upper), alpha=0.2)+
+  
+  geom_line(aes(x=time_pred_sans_covid, y=pred_arma$mean, color='blue'))+
+  geom_ribbon(aes(x=time_pred_sans_covid, ymin=pred_arma$lower, ymax=pred_arma$upper), alpha=0.4)+
+  labs(x="temps", y="ASK")+
+  scale_color_manual(name=NULL,
+                     breaks=c("black","red", "green", "blue"),
+                     values=c("black","red", "green", "blue"),
+                     labels=c("courbe ASK", "prédiction H-W avec covid","prediction H-W sans covid",  "prédiction arma \n sans covid" ))+
+  theme(legend.position="bottom")+
+  ggtitle("Impact de la crise sanitaire sur les prévisions")
+  
+```
+
